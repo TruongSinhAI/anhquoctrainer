@@ -126,8 +126,22 @@ if mode == "📹 Webcam Realtime":
         mode=WebRtcMode.SENDRECV,
         video_transformer_factory=lambda: VideoTransformer(selected_model_path),
         media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-        async_processing=False,
+        rtc_configuration = {
+            "iceServers": [
+                {"urls": "stun:stun.l.google.com:19302"},
+                {"urls": "stun:stun.l.google.com:19305"},
+                {"urls": "stun:stun1.l.google.com:19302"},
+                {"urls": "stun:stun2.l.google.com:19302"},
+                {"urls": "stun:stun3.l.google.com:19302"},
+                {"urls": "stun:stun4.l.google.com:19302"},
+                {"urls": "stun:stunserver.stunprotocol.org:3478"},
+                {"urls": "stun:stun.voipawesome.com:3478"},
+                {"urls": "stun:stun.nextcloud.com:3478"},
+                {"urls": "stun:stun.counterpath.com:3478"},
+                {"urls": "stun:stun.services.mozilla.com:3478"},
+            ]
+        },
+        async_processing=True,
     )
 
 # --- UPLOAD VIDEO ---
