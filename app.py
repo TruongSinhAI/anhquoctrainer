@@ -3,7 +3,7 @@ import tempfile
 import os
 import shutil
 from run import analyze_video_and_return_data, ExerciseDetector, extract_keypoints_for_sequence, analyze_webcam
-
+from streamlit_webrtc import WebRtcMode, webrtc_streamer
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 import tensorflow as tf
 import mediapipe as mp
@@ -179,10 +179,17 @@ if mode == "📤 Upload Video":
 # --- XỬ LÝ WEBCAM REALTIME ---
 elif mode == "📹 Webcam Realtime":
     st.warning("⚠️ Hãy cho phép trình duyệt sử dụng webcam.")
-    webrtc_streamer(
+    webrtc_ctx = webrtc_streamer(
         key=f"realtime-{selected_model_name.lower().replace(' ', '-')}",
+        mode=WebRtcMode.SENDRECV,
         video_processor_factory=lambda: VideoProcessor(selected_model_path),
         media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={
+            "iceServers": [
+                {"urls": ["stun:stun.l.google.com:19302"]},
+                {"urls": ["stun:stun1.l.google.com:19302"]},
+            ]
+        },
         async_processing=True,
     )
 
