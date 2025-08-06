@@ -1,28 +1,25 @@
 import streamlit as st
-import tempfile
-import os
-import shutil
-from run import analyze_video_and_return_data, ExerciseDetector, extract_keypoints_for_sequence, analyze_webcam
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
-import tensorflow as tf
-import mediapipe as mp
-import numpy as np
+from streamlit_webrtc import webrtc_streamer, VideoTransformerBase, WebRtcMode
+import av
 import cv2
+import numpy as np
+import mediapipe as mp
 from collections import deque
 from ultralytics import YOLO
 import torch
+import tensorflow as tf
+import os
+from datetime import datetime
+
+from run import analyze_video_and_return_data, ExerciseDetector, extract_keypoints_for_sequence
+from run2 import analyze_video_and_return_data_yolo
 from utils_overlay import draw_feedback_overlay
-from run2 import analyze_video_and_return_data_yolo, analyze_webcam_yolo
-
-
 
 # --- CẤU HÌNH MODEL ---
 MODEL_MAP = {
     "Model A": "model/best_model_2307.keras",
-    "Model B": "YOLO"  # dùng chuỗi "YOLO" để biết là dùng mô hình best.pt
+    "Model B": "YOLO"
 }
-
 
 DETAIL_MODEL_PATHS = {
     'bicep_model': "model/bicep_KNN_model.pkl", 'bicep_scaler': "model/bicep_input_scaler.pkl",
@@ -33,8 +30,8 @@ DETAIL_MODEL_PATHS = {
     'lunge_scaler': "model/lunge_input_scaler.pkl"
 }
 
-# --- VIDEO PROCESSOR CHO STREAMLIT-WEBRTC ---
-class VideoProcessor(VideoTransformerBase):
+# --- VIDEO PROCESSOR ---
+class VideoTransformer(VideoTransformerBase):
     def __init__(self, model_path):
         self.sequence = deque(maxlen=30)
         self.frame_counter = 0
@@ -42,72 +39,60 @@ class VideoProcessor(VideoTransformerBase):
         self.last_confidence = 0.0
         self.pose = mp.solutions.pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
         self.actions = np.array(['curl', 'lunge', 'plank', 'situp', 'squat'])
-
         self.detector = ExerciseDetector(DETAIL_MODEL_PATHS)
 
         if model_path == "YOLO":
-            # Dùng YOLO thay vì model keras
             self.use_yolo = True
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-            self.yolo_model = YOLO("model/best.pt")
-            self.yolo_model.to(self.device)
+            self.yolo_model = YOLO("model/best.pt").to(self.device)
             self.yolo_model.model.fuse()
         else:
-            # Dùng model keras như cũ
-            import tensorflow as tf
             self.use_yolo = False
             self.model = tf.keras.models.load_model(model_path)
 
         self.threshold = 0.4
 
-    def transform(self, frame):
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         image = frame.to_ndarray(format="bgr24")
         image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         results = self.pose.process(image_rgb)
         image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
         if results.pose_landmarks:
-            mp.solutions.drawing_utils.draw_landmarks(
-                image, results.pose_landmarks, mp.solutions.pose.POSE_CONNECTIONS)
-
+            mp.solutions.drawing_utils.draw_landmarks(image, results.pose_landmarks, mp.solutions.pose.POSE_CONNECTIONS)
             keypoints = extract_keypoints_for_sequence(results)
             self.sequence.append(keypoints)
 
-            if self.use_yolo:
-    # Nếu đang dùng YOLO (Model B)
-                if self.frame_counter % 5 == 0:
-                    yolo_result = self.yolo_model.predict(image, device=self.device, conf=0.25, verbose=False)[0]
-                    if yolo_result.boxes:
-                        best_box = max(yolo_result.boxes, key=lambda box: float(box.conf[0]))
-                        class_id = int(best_box.cls[0])
-                        class_name = self.yolo_model.names[class_id]
-
-                        exercise_map = {
-                            'bicep': 'Bicep Curl',
-                            'lunge': 'Lunge',
-                            'plank': 'Plank',
-                            'situp': 'Situp',
-                            'squat': 'Squat'
-                        }
-                        action = exercise_map.get(class_name, class_name.title())
-                        if self.last_action != action:
-                            self.detector.set_exercise_type(action)
-                        self.last_action = action
-                        self.last_confidence = float(best_box.conf[0])
-            else:
-                # Dùng model keras như cũ
-                if len(self.sequence) == 30 and self.frame_counter % 5 == 0:
-                    res = self.model.predict(np.expand_dims(list(self.sequence), axis=0), verbose=0)[0]
-                    confidence = np.max(res)
-                    if confidence > self.threshold:
-                        action = self.actions[np.argmax(res)]
-                        if self.last_action != action:
-                            self.detector.set_exercise_type(action.replace("curl", "Bicep Curl").title())
-                        self.last_action = action
-                        self.last_confidence = confidence
-                    else:
-                        self.last_action = "DETECTING..."
-                        self.last_confidence = confidence
+            if self.use_yolo and self.frame_counter % 5 == 0:
+                yolo_result = self.yolo_model.predict(image, device=self.device, conf=0.25, verbose=False)[0]
+                if yolo_result.boxes:
+                    best_box = max(yolo_result.boxes, key=lambda box: float(box.conf[0]))
+                    class_id = int(best_box.cls[0])
+                    class_name = self.yolo_model.names[class_id]
+                    exercise_map = {
+                        'bicep': 'Bicep Curl',
+                        'lunge': 'Lunge',
+                        'plank': 'Plank',
+                        'situp': 'Situp',
+                        'squat': 'Squat'
+                    }
+                    action = exercise_map.get(class_name, class_name.title())
+                    if self.last_action != action:
+                        self.detector.set_exercise_type(action)
+                    self.last_action = action
+                    self.last_confidence = float(best_box.conf[0])
+            elif not self.use_yolo and len(self.sequence) == 30 and self.frame_counter % 5 == 0:
+                res = self.model.predict(np.expand_dims(list(self.sequence), axis=0), verbose=0)[0]
+                confidence = np.max(res)
+                if confidence > self.threshold:
+                    action = self.actions[np.argmax(res)]
+                    if self.last_action != action:
+                        self.detector.set_exercise_type(action.replace("curl", "Bicep Curl").title())
+                    self.last_action = action
+                    self.last_confidence = confidence
+                else:
+                    self.last_action = "DETECTING..."
+                    self.last_confidence = confidence
 
             result = self.detector.analyze_exercise(
                 results,
@@ -116,16 +101,11 @@ class VideoProcessor(VideoTransformerBase):
                 visibility_threshold=0.6
             )
 
-            
-
-            # 🔁 Overlay tối ưu + dựng dọc góc trái + nhỏ gọn + feedback xuống dòng riêng
-
             image = draw_feedback_overlay(image, self.detector, result, self.last_action, self.last_confidence)
 
-            self.frame_counter += 1
-            image = cv2.resize(image, (1080, 720))
-            return image
-
+        self.frame_counter += 1
+        image = cv2.resize(image, (1080, 720))
+        return av.VideoFrame.from_ndarray(image, format="bgr24")
 
 # --- STREAMLIT UI ---
 st.set_page_config(page_title="AI Fitness Coach", layout="centered")
@@ -135,21 +115,26 @@ mode = st.radio("🎬 Chọn chế độ hoạt động:", ["📹 Webcam Realtim
 selected_model_name = st.selectbox("🧠 Chọn mô hình:", list(MODEL_MAP.keys()))
 selected_model_path = MODEL_MAP[selected_model_name]
 
-# --- TẠO THƯ MỤC KẾT QUẢ THEO MODEL ---
-if selected_model_name == "Model A":
-    output_dir = "result_model_a"
-else:
-    output_dir = "result_model_b"
-
+output_dir = "result_model_a" if selected_model_name == "Model A" else "result_model_b"
 os.makedirs(output_dir, exist_ok=True)
 
+# --- WEBCAM REALTIME ---
+if mode == "📹 Webcam Realtime":
+    st.warning("⚠️ Hãy cho phép trình duyệt sử dụng webcam.")
+    webrtc_streamer(
+        key=f"realtime-{selected_model_name}",
+        mode=WebRtcMode.SENDRECV,
+        video_transformer_factory=lambda: VideoTransformer(selected_model_path),
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+        async_processing=True,
+    )
 
-# --- XỬ LÝ VIDEO UPLOAD ---
-from datetime import datetime  # Thêm import này nếu chưa có
-
-if mode == "📤 Upload Video":
+# --- UPLOAD VIDEO ---
+elif mode == "📤 Upload Video":
     uploaded_file = st.file_uploader("🎥 Tải video bài tập (MP4)", type=["mp4"])
     if uploaded_file is not None:
+        import tempfile
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(uploaded_file.read())
             video_path = tmp.name
@@ -157,16 +142,13 @@ if mode == "📤 Upload Video":
         st.video(video_path)
         st.info("⏳ Đang phân tích video...")
 
-        # 🔸 Tạo tên file có timestamp để không bị ghi đè
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = os.path.join(output_dir, f"output_{timestamp}.webm")
 
-        # 🔸 Phân tích và lưu video đầu ra
         if selected_model_name == "Model A":
             result_path = analyze_video_and_return_data(video_path, output_path=output_path)
         else:
             result_path = analyze_video_and_return_data_yolo(video_path, output_path=output_path)
-
 
         if result_path and os.path.exists(result_path):
             st.success("✅ Phân tích xong! Xem video kết quả bên dưới.")
@@ -176,25 +158,7 @@ if mode == "📤 Upload Video":
         else:
             st.error("❌ Có lỗi xảy ra khi phân tích video.")
 
-# --- XỬ LÝ WEBCAM REALTIME ---
-elif mode == "📹 Webcam Realtime":
-    st.warning("⚠️ Hãy cho phép trình duyệt sử dụng webcam.")
-    webrtc_ctx = webrtc_streamer(
-        key=f"realtime-{selected_model_name.lower().replace(' ', '-')}",
-        mode=WebRtcMode.SENDRECV,
-        video_processor_factory=lambda: VideoProcessor(selected_model_path),
-        media_stream_constraints={"video": True, "audio": False},
-        rtc_configuration={
-            "iceServers": [
-                {"urls": ["stun:stun.l.google.com:19302"]},
-                {"urls": ["stun:stun1.l.google.com:19302"]},
-            ]
-        },
-        async_processing=True,
-    )
-
-# --- HIỂN THỊ TOÀN BỘ KẾT QUẢ VIDEO THEO MODEL ---
-
+# --- HIỂN THỊ VIDEO KẾT QUẢ ---
 st.markdown("---")
 st.subheader("📁 Kết quả đã lưu theo từng model")
 
@@ -203,7 +167,6 @@ def show_results_section(model_label, folder):
     if not os.path.exists(folder):
         st.info("Chưa có kết quả nào.")
         return
-
     videos = sorted([f for f in os.listdir(folder) if f.endswith(".webm")], reverse=True)
     if not videos:
         st.info("Chưa có kết quả nào.")
@@ -211,9 +174,5 @@ def show_results_section(model_label, folder):
         for vid in videos:
             st.video(os.path.join(folder, vid))
 
-# ✅ Gọi cho từng model
 show_results_section("Model A", "result_model_a")
 show_results_section("Model B", "result_model_b")
-
-
-
